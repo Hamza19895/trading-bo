@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>بوت التداول — شموع حقيقية وصدور صفقات</title>
+
+  <!-- Lightweight Charts (شموع جميلة وقريبة من شكل MT5) -->
+  <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+
+  <style>
+    :root{--bg:#0d1117;--panel:#0f1720;--accent:#06d6a0;--danger:#ff7b72;--muted:#94a3b8}
+    body{margin:0;font-family:Tahoma,Arial,Helvetica;background:var(--bg);color:#e6eef8}
+    .wrap{max-width:1100px;margin:18px auto;padding:14px}
+    .card{background:var(--panel);border-radius:12px;padding:12px;box-shadow:0 8px 30px rgba(2,6,23,.6)}
+    header{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+    h1{font-size:18px;margin:0}
+    .controls{display:flex;gap:8px;align-items:center}
+    select,input,button{background:#071124;border:1px solid #142235;color:#e6eef8;padding:8px;border-radius:8px}
+    button{cursor:pointer}
+    #chart{height:520px;border-radius:8px;margin-top:12px}
+    .status{display:flex;gap:12px;margin-top:12px;flex-wrap:wrap}
+    .box{background:#071020;padding:10px;border-radius:8px;min-width:180px}
+    .signal-buy{color:var(--accent);font-weight:700}
+    .signal-sell{color:var(--danger);font-weight:700}
+    .signal-neutral{color:var(--muted)}
+    #log{margin-top:12px;max-height:220px;overflow:auto;padding-right:8px}
+    table{width:100%;border-collapse:collapse;font-size:13px}
+    th,td{padding:8px;border-bottom:1px solid rgba(255,255,255,0.03);text-align:right}
+    .small{font-size:12px;color:var(--muted)}
+    footer{margin-top:12px;font-size:12px;color:var(--muted)}
+    @media(max-width:700px){header{flex-direction:column;align-items:stretch}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <header>
+        <div>
+          <h1>بوت التداول — شمعات حقيقية & إشارات</h1>
+          <div class="small">عرض الذهب وبتكوين — التحديث كل دقيقة — إشارات تلقائية كل 5 دقائق</div>
+        </div>
+
+        <div class="controls">
+          <label for="symbol">الأصل</label>
+          <select id="symbol">
+            <option value="BTCUSDT">بتكوين / USDT</option>
+            <option value="XAUUSDT">ذهب (XAU) / USDT</option>
+          </select>
+
+          <label for="timeframe">الفريم</label>
+          <select id="timeframe">
+            <option value="1m">1 دقيقة</option>
+            <option value="5m">5 دقائق</option>
+            <option value="15m">15 دقيقة</option>
+          </select>
+
+          <button id="startBtn">تشغيل التحديث</button>
+          <button id="stopBtn" disabled>إيقاف</button>
+          <button id="manualSignalBtn">توليد إشارة الآن</button>
+        </div>
+      </header>
+
+      <div id="chart"></div>
+
+      <div class="status">
+        <div class="box">
+          <div class="small">السعر الحالي</div>
+          <div id="price" style="font-size:18px">-</div>
+          <div id="lastUpdate" class="small"></div>
+        </div>
+
+        <div class="box">
+          <div class="small">آخر إشارة</div>
+          <div id="lastSignal" class="signal-neutral">-</div>
+          <div id="signalNotes" class="small"></div>
+        </div>
+
+        <div class="box">
+          <div class="small">الصفقات المرسلة (سجل)</div>
+          <div id="log" style="width:100%"></div>
+        </div>
+      </div>
+
+      <footer class="small">
+        ملاحظة: هذا الملف ينفّذ التحليل ويُنشئ إشارات. لتنفيذ صفقات حقيقية يجب ربطه بسيرفر آمن يحتوي API keys — لا تضع مفاتيحك في هذا الملف.
+      </footer>
+    </div>
+  </div>
+
+<script>
+// ====== إعداد الرسم (Lightweight Charts) ======
+const chart = LightweightCharts.createChart(document.getElementById('chart'), {
+  layout: { backgroundColor: '#0d1117', textColor: '#d1d4dc' },
+  grid: { vertLines: { color: '#151820' }, horzLines: { color: '#151820' } },
+  rightPriceScale: { borderColor: '#2b2f36' },
+  timeScale: { borderColor: '#2b2f36' }
+});
+const candleSeries = chart.addCandlestickSeries({
+  upColor: '#06d6a0',
+  downColor: '#ff7b72',
+  borderVisible: false,
+  wickUpColor: '#06d6a0',
+  wickDownColor: '#ff7b72'
+});
+
+// ====== مؤشرات: EMA و RSI ======
+function emaArray(values, period){
+  const k = 2/(period+1);
+  const out = new Array(values.length).fill(null);
+  // seed SMA
+  let sum = 0;
+  for(let i=0;i<period;i++) sum += values[i];
+  let prev = sum/period;
+  out[period-1]=prev;
+  for(let i=period;i<values.length;i++){
+    prev = values[i]*k + prev*(1-k);
+    out[i]=prev;
+  }
+  return out;
+}
+
+function rsiArray(values, period=14){
+  if(values.length <= period) return new Array(values.length).fill(null);
+  let gains=0, losses=0;
+  for(let i=1;i<=period;i++){
+    const d = values[i]-values[i-1];
+    if(d>0) gains+=d; else losses+=Math.abs(d);
+  }
+  let avgGain = gains/period, avgLoss = losses/period;
+  const out = new Array(values.length).fill(null);
+  out[period] = 100 - (100/(1 + (avgGain/(avgLoss||1e-8))));
+  for(let i=period+1;i<values.length;i++){
+    const d = values[i]-values[i-1];
+    const gain = d>0?d:0; const loss = d<0?Math.abs(d):0;
+    avgGain = (avgGain*(period-1) + gain)/period;
+    avgLoss = (avgLoss*(period-1) + loss)/period;
+    out[i] = 100 - (100/(1 + (avgGain/(avgLoss||1e-8))));
+  }
+  return out;
+}
+
+// ====== متغيرات و UI ======
+let candles = []; // بيانات الشموع (time in seconds)
+let pollingTimer = null;
+let signalTimer = null;
+
+const priceEl = document.getElementById('price');
+const lastUpdateEl = document.getElementById('lastUpdate');
+const lastSignalEl = document.getElementById('lastSignal');
+const signalNotesEl = document.getElementById('signalNotes');
+const logEl = document.getElementById('log');
+
+const symbolSelect = document.getElementById('symbol');
+const timeframeSelect = document.getElementById('timeframe');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const manualSignalBtn = document.getElementById('manualSignalBtn');
+
+// ====== دوال المساعدة ======
+function unixSeconds(ts){ return Math.floor(ts/1000); }
+function nowStr(){ return new Date().toLocaleString(); }
+function appendLog(rowHtml){
+  const div = document.createElement('div');
+  div.style.padding='6px 0';
+  div.innerHTML = rowHtml;
+  logEl.prepend(div);
+}
+
+// ====== جلب الشموع من Binance ======
+async function fetchKlines(symbol='BTCUSDT', interval='1m', limit=200){
+  const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+  const res = await fetch(url);
+  if(!res.ok) throw new Error('خطأ استجابة '+res.status);
+  const data = await res.json();
+  // كل صف: [openTime, open, high, low, close, volume, ...]
+  return data.map(r => ({
+    time: Math.floor(r[0]/1000),
+    open: +r[1],
+    high: +r[2],
+    low: +r[3],
+    close: +r[4],
+    volume: +r[5]
+  }));
+}
+
+// ====== تحديث الشارت (كل دقيقة تقريبًا) ======
+async function updateChart(){
+  try{
+    const symbol = symbolSelect.value;
+    const interval = timeframeSelect.value;
+    const raw = await fetchKlines(symbol, interval, 200);
+    candles = raw;
+    candleSeries.setData(candles);
+    // سعر آخر
+    const last = candles[candles.length-1];
+    priceEl.innerText = last ? last.close.toLocaleString(undefined,{maximumFractionDigits:8}) : '-';
+    lastUpdateEl.innerText = 'آخر تحديث: ' + nowStr();
+  }catch(err){
+    appendLog(`<span style="color:#ffb86b">خطأ تحميل الشموع: ${err.message}</span>`);
+    console.error(err);
+  }
+}
+
+// ====== منطق توليد الإشارة (EMA8/EMA21 + RSI14) ======
+function analyzeSignal(){
+  if(!candles || candles.length < 30) { return { signal:'NEUTRAL', notes:'بيانات غير كافية' }; }
+  const closes = candles.map(c=>c.close);
+  const ema8 = emaArray(closes,8);
+  const ema21 = emaArray(closes,21);
+  const rsi = rsiArray(closes,14);
+
+  const i = closes.length - 1;
+  const prev = i - 1;
+
+  const e8_now = ema8[i], e8_prev = ema8[prev];
+  const e21_now = ema21[i], e21_prev = ema21[prev];
+  const rsi_now = rsi[i];
+
+  let signal = 'NEUTRAL', notes='';
+
+  if(e8_prev && e21_prev && e8_now && e21_now){
+    if(e8_prev <= e21_prev && e8_now > e21_now && rsi_now && rsi_now > 55){
+      signal = 'BUY';
+      notes = `تقاطع EMA8 فوق EMA21 و RSI=${rsi_now.toFixed(1)}`;
+    } else if(e8_prev >= e21_prev && e8_now < e21_now && rsi_now && rsi_now < 45){
+      signal = 'SELL';
+      notes = `تقاطع EMA8 تحت EMA21 و RSI=${rsi_now.toFixed(1)}`;
+    } else {
+      signal = 'NEUTRAL';
+      notes = `لا توجد إشارة واضحة — RSI=${rsi_now? rsi_now.toFixed(1):'-'}`;
+    }
+  } else {
+    notes = 'ننتظر اكتمال بيانات EMA';
+  }
+
+  return { signal, notes, price: closes[i], time: candles[i].time };
+}
+
+// ====== إرسال أمر حقيقي (دالة مثال — تحتاج سيرفر) ======
+// ملاحظة مهمة جداً: تنفيذ أوامر حقيقية يتطلب وضع API KEY/SECRET على سيرفر آمن.
+// لن يرسل هذا الكود أمر شراء إلى البورصة بدون رابط سيرفر جاهز.
+// إذا أردت، أضع لك مثال Node.js صغير في رسالة لاحقة.
+async function sendOrderToServer(payload){
+  // مثال: POST إلى سيرفرك الخاص الذي يتعامل مع Binance API أو MT5
+  // const res = await fetch('https://your-server.example.com/api/place_order', {
+  //   method:'POST',
+  //   headers:{'Content-Type':'application/json'},
+  //   body: JSON.stringify(payload)
+  // });
+  // const data = await res.json();
+  // return data;
+
+  // حالياً سنُظهر محاكاة فقط:
+  return { ok:true, note:'محاكاة تنفيذ أمر (ضع سيرفرك هنا لتنفيذ حقيقي)' };
+}
+
+// ====== توليد صفقة (يدوي أو تلقائي) ======
+async function generateAndMaybeExecute(isAuto=false){
+  try{
+    const res = analyzeSignal();
+    const symbol = symbolSelect.value;
+    const timeStr = new Date(res.time*1000).toLocaleString();
+    lastUpdateEl.innerText = 'آخر تحليل: ' + nowStr();
+
+    if(res.signal === 'BUY'){
+      lastSignalEl.className = 'signal-buy';
+      lastSignalEl.innerText = '✅ شراء';
+    } else if(res.signal === 'SELL'){
+      lastSignalEl.className = 'signal-sell';
+      lastSignalEl.innerText = '❌ بيع';
+    } else {
+      lastSignalEl.className = 'signal-neutral';
+      lastSignalEl.innerText = '➡️ حيادي';
+    }
+    signalNotesEl.innerText = res.notes;
+
+    // سجل الإشارة بالواجهة
+    appendLog(`<b>${timeStr}</b> — ${symbol} — <span class="${res.signal==='BUY'?'signal-buy':res.signal==='SELL'?'signal-sell':'signal-neutral'}">${res.signal}</span> — السعر: ${res.price}`);
+
+    // إذا تبي تنفيذ حقيقي أوتوماتيكي: (مفعل افتراضياً هنا كـ false)
+    const AUTO_EXECUTE = false; // غيّره إلى true فقط لو ربطت سيرفر آمن
+    if(AUTO_EXECUTE && (res.signal === 'BUY' || res.signal === 'SELL')){
+      const order = {
+        symbol,
+        side: res.signal,
+        price: res.price,
+        qty: 0.01, // عدّل حسب الحاجة أو واجهة السيرفر
+        strategy: 'EMA8-21 + RSI14'
+      };
+      const out = await sendOrderToServer(order);
+      appendLog(`<span style="color:#9ae6b4">تنفيذ: ${JSON.stringify(order)} — نتيجة: ${JSON.stringify(out)}</span>`);
+    }
+  }catch(err){
+    appendLog(`<span style="color:#ffb86b">خطأ أثناء توليد الإشارة: ${err.message}</span>`);
+    console.error(err);
+  }
+}
+
+// ====== تحكم التشغيل التلقائي ======
+startBtn.addEventListener('click', ()=>{
+  startBtn.disabled = true; stopBtn.disabled = false;
+  // تحديث الشارت كل دقيقة
+  updateChart();
+  pollingTimer = setInterval(updateChart, 60*1000);
+  // تحليل/توليد إشارة كل 5 دقائق
+  generateAndMaybeExecute(false); // فوراً
+  signalTimer = setInterval(()=> generateAndMaybeExecute(true), 5*60*1000);
+});
+
+stopBtn.addEventListener('click', ()=>{
+  startBtn.disabled = false; stopBtn.disabled = true;
+  if(pollingTimer) clearInterval(pollingTimer);
+  if(signalTimer) clearInterval(signalTimer);
+});
+
+manualSignalBtn.addEventListener('click', ()=> generateAndMaybeExecute(false));
+symbolSelect.addEventListener('change', ()=> updateChart());
+timeframeSelect.addEventListener('change', ()=> updateChart());
+
+// اختياري: يبدأ تلقائياً (أوقف التعليق لو تحب التشغيل التلقائي فورًا)
+// startBtn.click();
+
+</script>
+</body>
+</html>
